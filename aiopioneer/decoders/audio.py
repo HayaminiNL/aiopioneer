@@ -407,6 +407,150 @@ class SpeakerChannelLevel(CodeMapSequence):
         return [response]
 
 
+class ChannelLevelAt(ChannelLevel):
+    """
+    Channel level value at a fixed position within a bulk multi-channel level
+    response/command (see SpeakerChannelLevelBulk). Same encoding as ChannelLevel
+    (code 50 = 0dB, +/-1 = +/-0.5dB) -- only property_name differs per position.
+    """
+
+    def __new__(cls, channel: str):
+        """Create a subclass bound to a fixed channel key."""
+        return type(
+            f"ChannelLevelAt_{channel}",
+            (ChannelLevelAt,),
+            {"friendly_name": f"channel level {channel}", "property_name": channel},
+        )
+
+
+class SpeakerChannelLevelBulk(CodeMapSequence):
+    """
+    Speaker channel level, bulk multi-channel variant (ILV command).
+
+    Used by AVRs (FY11-FY14 generation, e.g. VSX-924/VSX-1021) that report/accept
+    ALL channel levels in a single fixed-width message instead of the per-channel
+    CLV/ZGE/ZHE command family. Field order and scaling were reverse engineered
+    from the iControlAV2014 Android app
+    (jp.pioneer.avsoft.android.icontrolav.memory.remocon.avr.status.h / .j) and
+    confirmed against a real VSX-924: each field is 2 digits, code 50 = 0dB,
+    +/-1 = +/-0.5dB -- identical encoding to ChannelLevel/CLV, just packed
+    positionally with no channel-code prefix.
+
+    Wire format for SET, confirmed live against a real VSX-924 (differs from
+    both the naive "ILV"+data guess AND from what the decompiled app's own
+    aq.java/ar.java SET methods do):
+      - the full 20-field sequence must be sent, not just the base 12 -- the
+        receiver rejects a 12-field SET as "unknown command" even though the
+        decompiled app itself never sends more than 12. Whatever the app's own
+        historical limitation was, this receiver's firmware accepts (and
+        requires) the complete sequence.
+      - the command name goes at the END of the message ("<20 fields>ILV"), not
+        the start -- matching this receiver's convention for other small
+        prefix-style commands too (e.g. CLV set command wire format is
+        confirmed to be "<channel><level>CLV", and CMU send order was
+        independently captured as value-then-command as well). The QUERY
+        direction is the opposite: "?ILV" out, "ILV<data>" back.
+      - SW (index 7, the legacy single-subwoofer field) and SW1 (index 18) are
+        NOT mirrors of each other on this receiver, contrary to what the
+        decompiled app's "plain model" branch of h.a(float) suggested --
+        setting index 7 alone, confirmed live, did not change index 18's
+        reported value. They are mapped to distinct properties accordingly.
+    """
+
+    friendly_name = "speaker channel level (bulk)"
+    base_property = "channel_level"
+    property_name = "bulk"  # unused for actual storage -- see ChannelLevelAt
+
+    ## Base 12 channels -- present on all generations that support ILV.
+    code_map_sequence = [
+        ChannelLevelAt("L"),
+        ChannelLevelAt("R"),
+        ChannelLevelAt("C"),
+        ChannelLevelAt("SL"),
+        ChannelLevelAt("SR"),
+        ChannelLevelAt("SBL"),
+        ChannelLevelAt("SBR"),
+        ChannelLevelAt("SW"),
+        ChannelLevelAt("FHL"),
+        ChannelLevelAt("FHR"),
+        ChannelLevelAt("FWL"),
+        ChannelLevelAt("FWR"),
+    ]
+    ## FY13+ AVRs extend the response with top/height channels and an
+    ## independent SW1/SW2 stereo-subwoofer level (empirically NOT the same as
+    ## the legacy SW field at index 7 -- see class docstring). Two further
+    ## fields reported by the source app after this (RearHeightL/R) are always
+    ## a verbatim mirror of TRL/TRR on receivers without dedicated Top Rear
+    ## speakers -- intentionally not exposed separately here since they never
+    ## carry independent information.
+    code_map_sequence_extra_1 = [
+        *code_map_sequence,
+        ChannelLevelAt("TML"),
+        ChannelLevelAt("TMR"),
+        ChannelLevelAt("TFL"),
+        ChannelLevelAt("TFR"),
+        ChannelLevelAt("TRL"),
+        ChannelLevelAt("TRR"),
+        ChannelLevelAt("SW1"),
+        ChannelLevelAt("SW2"),
+    ]
+
+    @classmethod
+    def _sequence_for_length(cls, code_len: int) -> list:
+        if code_len >= cls.get_len_sequence(cls.code_map_sequence_extra_1):
+            return cls.code_map_sequence_extra_1
+        return cls.code_map_sequence
+
+    @classmethod
+    def decode_response(cls, response: Response, params: AVRParams) -> list[Response]:
+        return cls.decode_response_sequence(
+            response=response,
+            params=params,
+            code_map_sequence=cls._sequence_for_length(len(response.code)),
+        )
+
+    @classmethod
+    def get_nargs(cls) -> int:
+        ## parse_args below takes (channel, level), not one arg per sequence field
+        return 2
+
+    @classmethod
+    def get_parser(cls, parser) -> None:
+        SpeakerChannel.get_parser(parser)
+        ChannelLevel.get_parser(parser)
+
+    @classmethod
+    def parse_args(
+        cls,
+        command: str,  # pylint: disable=unused-argument
+        args: list,
+        zone: Zone,
+        params: AVRParams,  # pylint: disable=unused-argument
+        properties: AVRProperties,
+    ) -> str:
+        """
+        Build a full ILV SET string (all 20 fields -- see class docstring) by
+        merging the requested channel/level change into the most recently known
+        levels for the other channels. The AVR requires the whole sequence sent
+        together in one message; there is no per-channel set variant.
+        """
+        cls.check_args(args)
+        channel, level = args
+        sequence = cls.code_map_sequence_extra_1
+        settable_channels = [c.property_name for c in sequence]
+        if channel not in settable_channels:
+            raise ValueError(
+                f"channel {channel!r} cannot be set via the bulk speaker level "
+                f"command (known channels: {settable_channels})"
+            )
+        current = dict(properties.channel_level.get(zone, {}))
+        current[channel] = level
+        return "".join(
+            ChannelLevel.value_to_code(current.get(c.property_name, 0))
+            for c in sequence
+        )
+
+
 class ListeningModeIndex(CodeIntMap):
     """Listening mode index."""
 
@@ -570,6 +714,21 @@ PROPERTIES_AUDIO = [
             avr_args=[CodeMapQuery(SpeakerChannel)],
             wait_for_response=True,
         ),
+    ),
+    ## Bulk-format equivalent of the above for FY11-FY14 AVRs (e.g. VSX-924) that
+    ## do not support CLV/ZGE/ZHE -- see SpeakerChannelLevelBulk docstring.
+    ## NOTE: SET wire format is confirmed live to be "<data>ILV" (command name
+    ## LAST), the reverse of the QUERY direction ("?ILV" out, "ILV<data>" back)
+    ## -- matching how CLV's own SET is confirmed to send "<channel><level>CLV".
+    ## Since send_command's generic single-avr_arg path already places the
+    ## encoded args as a *prefix* before avr_command (see property_entry.py /
+    ## pioneer_avr.py send_command), the default single-item avr_args=[code_map]
+    ## from gen_set_property already produces exactly "<data>" + "ILV" -- no
+    ## override needed here (unlike an earlier, incorrect attempt at this).
+    gen_set_property(
+        SpeakerChannelLevelBulk,
+        {Zone.Z1: "ILV"},
+        query_command=AVRCommand(is_query_command=True, wait_for_response=True),
     ),
     gen_set_property(
         ListeningMode,
