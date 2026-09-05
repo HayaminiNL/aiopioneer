@@ -52,6 +52,7 @@ from .params import (
     PARAM_ENABLED_FUNCTIONS,
     PARAM_INITIAL_REFRESH_FUNCTIONS,
     PARAM_DISABLE_AUTO_QUERY,
+    PARAM_CHANNEL_LEVEL_COMMAND,
 )
 from .properties import AVRProperties
 from .property_registry import PROPERTY_REGISTRY
@@ -845,6 +846,14 @@ class PioneerAVR(AVRConnection):
     ) -> None:
         """Set the level (gain) for amplifier channel in zone."""
         zone = self._check_zone(zone)
+        ## Some FY11-FY14 AVRs (e.g. VSX-924) accept the modern per-channel CLV
+        ## command syntactically but don't actually apply it -- PARAM_CHANNEL_LEVEL_COMMAND
+        ## routes those to the legacy bulk ILV command instead. See params.py.
+        if self.params.get_param(PARAM_CHANNEL_LEVEL_COMMAND) == "ILV":
+            await self.send_command(
+                "set_channel_level_bulk", channel, level, zone=zone
+            )
+            return
         await self.send_command("set_channel_level", channel, level, zone=zone)
 
     async def set_video_settings(self, zone: Zone, **arguments) -> None:
