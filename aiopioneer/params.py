@@ -238,7 +238,16 @@ PARAM_DEFAULTS = {
     PARAM_EXTRA_LISTENING_MODES: {},
     PARAM_DISABLED_LISTENING_MODES: [],
     PARAM_ENABLED_LISTENING_MODES: [],
-    PARAM_VIDEO_RESOLUTION_MODES: ["0", "1", "3", "4", "5", "6", "7", "8", "9"],
+    ## NOTE: must match VideoResolution.code_map's 2-digit zero-padded keys
+    ## ("00".."09"), not bare digits -- VideoResolution.parse_args() builds its
+    ## `code` via value_to_code() against that code_map, so a single-digit list
+    ## here can never match and set_video_resolution always raises
+    ## AVRCommandUnavailableError. Confirmed live on a VSX-924 (2026-09-06):
+    ## every SET attempt failed with e.g. "resolution 1080p unavailable" until
+    ## this was fixed to 2-digit strings.
+    PARAM_VIDEO_RESOLUTION_MODES: [
+        "00", "01", "03", "04", "05", "06", "07", "08", "09",
+    ],
     PARAM_MHL_SOURCE: None,
     PARAM_TUNER_AM_FREQ_STEP: None,
 }
