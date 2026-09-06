@@ -599,14 +599,16 @@ class GraphicEqBand(CodeFloatMap):
     """
     Graphic EQ band level (ATB command). Same (code - 50) * 0.5 dB scale as
     ChannelLevel/ILV/CLV -- see GraphicEqBulk docstring for how this was confirmed.
+    Range is +/-6dB (code 38-62), confirmed live by driving all 9 bands to both
+    slider extremes (2026-09-06) -- narrower than ChannelLevel/ILV's +/-12dB.
     """
 
     friendly_name = "graphic EQ band level"
     base_property = "graphic_eq"
-    property_name = "band"  # unused for decode -- see GraphicEqBandAt
+    property_name = "level"  # unused for decode -- see GraphicEqBandAt
 
-    value_min = -12
-    value_max = 12
+    value_min = -6
+    value_max = 6
     value_step = 0.5
     value_divider = 0.5
     value_offset = 25
@@ -635,49 +637,94 @@ class GraphicEqBulk(CodeMapSequence):
     """
     9-band graphic equalizer, bulk multi-band variant (ATB command).
 
-    Confirmed via real app traffic capture (2026-09-06) -- see PROTOCOL_FINDINGS.md
-    for the full session log. Two earlier code-derived guesses (`AEQ`, then `ACE`,
-    traced from the decompiled `gl.java`/`FingerEqStatus`/`EmphasisViewFingerEQ`
-    classes) were both rejected live by the receiver as "unknown command" -- `ATB`
-    was only found by capturing the official app's own traffic, not from the code.
+    Confirmed via two real app traffic captures (2026-09-06) -- see
+    PROTOCOL_FINDINGS.md for the full session log. Two earlier code-derived guesses
+    (`AEQ`, then `ACE`, traced from the decompiled `gl.java`/`FingerEqStatus`/
+    `EmphasisViewFingerEQ` classes) were both rejected live by the receiver as
+    "unknown command" -- `ATB` was only found by capturing the official app's own
+    traffic, not from the code.
 
     Wire format: 11 fields of 2 chars each (22 chars total), same (code - 50) * 0.5
     dB scale as ChannelLevel/ILV/CLV:
-      - field[0]: constant "00" throughout the capture -- unidentified (possibly a
-        zone or response-type flag), not exposed as a property.
-      - fields[1..9]: the 9 bands, confirmed in order by watching the user adjust
-        them "low to high" in the app and observing each field lock in one at a
-        time: 63Hz, 125Hz, 250Hz, 500Hz, 1kHz, 2kHz, 4kHz, 8kHz, 16kHz.
-      - field[10]: untouched throughout the capture (stayed at code 50 / 0dB) --
+      - field[0]: constant "00" throughout both captures -- unidentified (possibly
+        a zone or response-type flag), not exposed as a property.
+      - fields[1..9]: the 9 bands, confirmed in order twice -- once by watching the
+        user adjust them "low to high" and observing each field lock in one at a
+        time, and again by driving every band to both slider extremes one at a
+        time: 63Hz, 125Hz, 250Hz, 500Hz, 1kHz, 2kHz, 4kHz, 8kHz, 16kHz. Confirmed
+        range is code 38-62 (+/-6dB) -- every band hit exactly 38 at max-negative
+        and 62 at max-positive, consistently.
+      - field[10]: untouched throughout both captures (stayed at code 50 / 0dB) --
         possibly a global "all bands" level mirroring `FingerEqStatus.level_All`
         in the decompiled app (which the ACE/AEQ encoder explicitly excluded from
-        its 9-band array). Decoded here for completeness; meaning not confirmed.
+        its 9-band array). Decoded here for completeness; meaning still unconfirmed,
+        not exposed as settable.
 
-    Query-only for now: `?ATB` out, `ATB<data>` back is confirmed, and the receiver
-    echoes `ATB<data>` back unchanged for every band the app touched in the capture
-    -- but that capture never isolated a genuine outbound SET frame from the
-    response echo, so it's still unknown whether SET follows the value-first,
-    command-last convention used by ILV/CLV/CMU or is command-first like the
-    response. Do not add a set_command here without a capture that confirms it.
+    SET confirmed live (2026-09-06, second capture): value-first, command-last --
+    `"<22-char-data>ATB"` -- the exact same convention as ILV/CLV/CMU. The app's
+    in-EQ "Reset" button sends the identical SET format with every band back at
+    code 50, not a separate command. Since send_command's generic single-avr_arg
+    path already places the encoded args as a prefix before avr_command, the
+    default single-item avr_args=[code_map] from gen_set_property already produces
+    exactly "<data>" + "ATB" -- no override needed (same reasoning as ILV).
     """
 
     friendly_name = "graphic equalizer"
     base_property = "graphic_eq"
     property_name = "bulk"  # unused for actual storage -- see GraphicEqBandAt
 
+    ## The 9 bands actually exposed/settable via the app's graphic EQ UI, confirmed
+    ## live. Does NOT include "ALL" (field[10]) -- that field was never touched in
+    ## either capture and its meaning/settability is unconfirmed, so it's decoded
+    ## for visibility but deliberately excluded from what callers can set.
+    BANDS = [
+        "63HZ", "125HZ", "250HZ", "500HZ", "1KHZ", "2KHZ", "4KHZ", "8KHZ", "16KHZ",
+    ]
+
     code_map_sequence = [
         CodeMapBlank(2),  # field[0]: constant "00", unidentified
-        GraphicEqBandAt("63HZ"),
-        GraphicEqBandAt("125HZ"),
-        GraphicEqBandAt("250HZ"),
-        GraphicEqBandAt("500HZ"),
-        GraphicEqBandAt("1KHZ"),
-        GraphicEqBandAt("2KHZ"),
-        GraphicEqBandAt("4KHZ"),
-        GraphicEqBandAt("8KHZ"),
-        GraphicEqBandAt("16KHZ"),
-        GraphicEqBandAt("ALL"),  # field[10]: untouched in capture, meaning unconfirmed
+        *(GraphicEqBandAt(band) for band in BANDS),
+        GraphicEqBandAt("ALL"),  # field[10]: untouched in both captures, meaning unconfirmed
     ]
+
+    @classmethod
+    def get_nargs(cls) -> int:
+        ## parse_args below takes (band, level), not one arg per sequence field
+        return 2
+
+    @classmethod
+    def get_parser(cls, parser) -> None:
+        parser.add_argument("band", choices=cls.BANDS, help="graphic EQ band")
+        GraphicEqBand.get_parser(parser)
+
+    @classmethod
+    def parse_args(
+        cls,
+        command: str,  # pylint: disable=unused-argument
+        args: list,
+        zone: Zone,
+        params: AVRParams,  # pylint: disable=unused-argument
+        properties: AVRProperties,
+    ) -> str:
+        """
+        Build a full 11-field ATB SET string by merging the requested band/level
+        change into the most recently known levels for the other bands -- the AVR
+        requires the whole sequence sent together in one message, same as ILV.
+        """
+        cls.check_args(args)
+        band, level = args
+        if band not in cls.BANDS:
+            raise ValueError(
+                f"band {band!r} cannot be set via the graphic EQ bulk command "
+                f"(known bands: {cls.BANDS})"
+            )
+        current = dict(properties.graphic_eq.get(zone, {}))
+        current[band] = level
+        return "00" + "".join(
+            GraphicEqBand.value_to_code(current.get(c.property_name, 0))
+            for c in cls.code_map_sequence
+            if issubclass(c, GraphicEqBand)
+        )
 
 
 class ListeningModeIndex(CodeIntMap):
@@ -873,15 +920,14 @@ PROPERTIES_AUDIO = [
             wait_for_response=True,
         ),
     ),
-    ## 9-band graphic EQ, confirmed live via real app traffic capture (see
-    ## GraphicEqBulk docstring). Query-only -- SET wire format not yet confirmed
-    ## from a genuine SET capture, do not add a set_command without one. Command
-    ## explicitly named "query_audio_..." (rather than the "query_graphic_eq_bulk"
-    ## gen_query_property would derive from base_property/property_name) so it
-    ## falls under the existing "audio" PARAM_ENABLED_FUNCTIONS bucket and gets
-    ## auto-refreshed like other audio properties, without adding a new bucket
-    ## just for this one feature.
-    gen_query_property(
+    ## 9-band graphic EQ, confirmed live via two real app traffic captures (see
+    ## GraphicEqBulk docstring) -- both decode AND set_command are now confirmed.
+    ## Query command explicitly named "query_audio_..." (rather than the
+    ## "query_graphic_eq_bulk" gen_query_property would derive from
+    ## base_property/property_name) so it falls under the existing "audio"
+    ## PARAM_ENABLED_FUNCTIONS bucket and gets auto-refreshed like other audio
+    ## properties, without adding a new bucket just for this one feature.
+    gen_set_property(
         GraphicEqBulk,
         {Zone.Z1: "ATB"},
         query_command=AVRCommand(
