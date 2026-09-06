@@ -16,6 +16,7 @@ from .code_map import (
     CodeDictStrMap,
     CodeStrMap,
     CodeBoolMap,
+    CodeInverseBoolMap,
     CodeIntMap,
     CodeFloatMap,
 )
@@ -407,6 +408,49 @@ class SpeakerChannelLevel(CodeMapSequence):
         return [response]
 
 
+class ChannelMute(CodeInverseBoolMap):
+    """
+    Speaker channel mute (CMU command). Wire "0" = muted, "1" = unmuted --
+    CodeInverseBoolMap gives a natural is_muted semantic (True = muted).
+    """
+
+    friendly_name = "channel mute"
+    base_property = "channel_mute"
+    property_name = "mute"  # unused for decode -- see SpeakerChannelMute
+    supported_zones = {Zone.Z1}  # only confirmed live against Main Zone so far
+
+
+class SpeakerChannelMute(CodeMapSequence):
+    """
+    Speaker channel mute / test-tone toggle (CMU command).
+
+    Used by the reference app during level calibration to temporarily silence or
+    play a test tone per channel, but confirmed live to work as a genuine
+    persistent per-channel mute independent of that context (state holds until
+    explicitly toggled back).
+
+    Confirmed via real app traffic capture (2026-09-06):
+      - SET wire format: "<channel><0|1>CMU" (value-first, command-last -- same
+        convention as ILV/CLV sends), e.g. "L__0CMU" = mute front left.
+      - Responses are command-first as usual: "CMU<channel><0|1>".
+      - QUERY is "?CMU<channel>" (command-first, channel as suffix) -- see the
+        CodeMapBlank(0) prefix trick on the query_command registration below,
+        same technique used for ILV's SET direction.
+    """
+
+    friendly_name = "speaker channel mute"
+    base_property = "channel_mute"
+    code_map_sequence = [SpeakerChannel, ChannelMute]
+
+    @classmethod
+    def decode_response(cls, response: Response, params: AVRParams) -> list[Response]:
+        responses = super().decode_response(response=response, params=params)
+        speaker = responses[0].value
+        muted = responses[1].value
+        response.update(code=responses[1].code, property_name=speaker, value=muted)
+        return [response]
+
+
 class ChannelLevelAt(ChannelLevel):
     """
     Channel level value at a fixed position within a bulk multi-channel level
@@ -549,6 +593,91 @@ class SpeakerChannelLevelBulk(CodeMapSequence):
             ChannelLevel.value_to_code(current.get(c.property_name, 0))
             for c in sequence
         )
+
+
+class GraphicEqBand(CodeFloatMap):
+    """
+    Graphic EQ band level (ATB command). Same (code - 50) * 0.5 dB scale as
+    ChannelLevel/ILV/CLV -- see GraphicEqBulk docstring for how this was confirmed.
+    """
+
+    friendly_name = "graphic EQ band level"
+    base_property = "graphic_eq"
+    property_name = "band"  # unused for decode -- see GraphicEqBandAt
+
+    value_min = -12
+    value_max = 12
+    value_step = 0.5
+    value_divider = 0.5
+    value_offset = 25
+    code_zfill = 2
+    icon = "mdi:equalizer"
+    supported_zones = {Zone.Z1}  # only confirmed live against Main Zone so far
+    unit_of_measurement = "dB"
+    ha_auto_entity = False
+    ha_enable_default = True
+    ha_number_mode = "slider"
+
+
+class GraphicEqBandAt(GraphicEqBand):
+    """Graphic EQ band value at a fixed position within the ATB bulk response."""
+
+    def __new__(cls, band: str):
+        """Create a subclass bound to a fixed band key."""
+        return type(
+            f"GraphicEqBandAt_{band}",
+            (GraphicEqBandAt,),
+            {"friendly_name": f"graphic EQ band {band}", "property_name": band},
+        )
+
+
+class GraphicEqBulk(CodeMapSequence):
+    """
+    9-band graphic equalizer, bulk multi-band variant (ATB command).
+
+    Confirmed via real app traffic capture (2026-09-06) -- see PROTOCOL_FINDINGS.md
+    for the full session log. Two earlier code-derived guesses (`AEQ`, then `ACE`,
+    traced from the decompiled `gl.java`/`FingerEqStatus`/`EmphasisViewFingerEQ`
+    classes) were both rejected live by the receiver as "unknown command" -- `ATB`
+    was only found by capturing the official app's own traffic, not from the code.
+
+    Wire format: 11 fields of 2 chars each (22 chars total), same (code - 50) * 0.5
+    dB scale as ChannelLevel/ILV/CLV:
+      - field[0]: constant "00" throughout the capture -- unidentified (possibly a
+        zone or response-type flag), not exposed as a property.
+      - fields[1..9]: the 9 bands, confirmed in order by watching the user adjust
+        them "low to high" in the app and observing each field lock in one at a
+        time: 63Hz, 125Hz, 250Hz, 500Hz, 1kHz, 2kHz, 4kHz, 8kHz, 16kHz.
+      - field[10]: untouched throughout the capture (stayed at code 50 / 0dB) --
+        possibly a global "all bands" level mirroring `FingerEqStatus.level_All`
+        in the decompiled app (which the ACE/AEQ encoder explicitly excluded from
+        its 9-band array). Decoded here for completeness; meaning not confirmed.
+
+    Query-only for now: `?ATB` out, `ATB<data>` back is confirmed, and the receiver
+    echoes `ATB<data>` back unchanged for every band the app touched in the capture
+    -- but that capture never isolated a genuine outbound SET frame from the
+    response echo, so it's still unknown whether SET follows the value-first,
+    command-last convention used by ILV/CLV/CMU or is command-first like the
+    response. Do not add a set_command here without a capture that confirms it.
+    """
+
+    friendly_name = "graphic equalizer"
+    base_property = "graphic_eq"
+    property_name = "bulk"  # unused for actual storage -- see GraphicEqBandAt
+
+    code_map_sequence = [
+        CodeMapBlank(2),  # field[0]: constant "00", unidentified
+        GraphicEqBandAt("63HZ"),
+        GraphicEqBandAt("125HZ"),
+        GraphicEqBandAt("250HZ"),
+        GraphicEqBandAt("500HZ"),
+        GraphicEqBandAt("1KHZ"),
+        GraphicEqBandAt("2KHZ"),
+        GraphicEqBandAt("4KHZ"),
+        GraphicEqBandAt("8KHZ"),
+        GraphicEqBandAt("16KHZ"),
+        GraphicEqBandAt("ALL"),  # field[10]: untouched in capture, meaning unconfirmed
+    ]
 
 
 class ListeningModeIndex(CodeIntMap):
@@ -729,6 +858,35 @@ PROPERTIES_AUDIO = [
         SpeakerChannelLevelBulk,
         {Zone.Z1: "ILV"},
         query_command=AVRCommand(is_query_command=True, wait_for_response=True),
+    ),
+    ## Per-channel mute / test-tone toggle, confirmed live via real app traffic
+    ## capture (see SpeakerChannelMute docstring). SET uses the default
+    ## prefix behaviour (channel+value before "CMU", same as ILV/CLV). QUERY
+    ## is "?CMU<channel>" (command first) -- CodeMapBlank(0) forces the channel
+    ## arg into the suffix slot so it lands after "?CMU" instead of before it.
+    gen_set_property(
+        SpeakerChannelMute,
+        {Zone.Z1: "CMU"},
+        query_command=AVRCommand(
+            avr_commands={Zone.Z1: "?CMU"},
+            avr_args=[CodeMapBlank(0), SpeakerChannel],
+            wait_for_response=True,
+        ),
+    ),
+    ## 9-band graphic EQ, confirmed live via real app traffic capture (see
+    ## GraphicEqBulk docstring). Query-only -- SET wire format not yet confirmed
+    ## from a genuine SET capture, do not add a set_command without one. Command
+    ## explicitly named "query_audio_..." (rather than the "query_graphic_eq_bulk"
+    ## gen_query_property would derive from base_property/property_name) so it
+    ## falls under the existing "audio" PARAM_ENABLED_FUNCTIONS bucket and gets
+    ## auto-refreshed like other audio properties, without adding a new bucket
+    ## just for this one feature.
+    gen_query_property(
+        GraphicEqBulk,
+        {Zone.Z1: "ATB"},
+        query_command=AVRCommand(
+            name="query_audio_graphic_eq", is_query_command=True, wait_for_response=True
+        ),
     ),
     gen_set_property(
         ListeningMode,
