@@ -349,11 +349,47 @@ class PioneerAVR(AVRConnection):
                 for command in PROPERTY_REGISTRY.get_commands(
                     prefix=f"query_{func}", zone=zone
                 ):
-                    if command.name == "query_channel_level":
+                    if command.name == "query_channel_level" and (
+                        self.params.get_param(PARAM_CHANNEL_LEVEL_COMMAND) == "ILV"
+                    ):
+                        ## This model reports/accepts channel levels via the bulk
+                        ## ILV command (query_channel_level_bulk, queued below via
+                        ## the generic no-args branch) and does not support the
+                        ## legacy per-channel CLV/ZGE/ZHE family at all -- see
+                        ## SpeakerChannelLevelBulk docstring. Skip the per-channel
+                        ## refresh entirely instead of firing CLV queries this
+                        ## receiver doesn't understand.
+                        continue
+                    if command.name in ("query_channel_level", "query_channel_mute"):
+                        ## Both commands require a per-channel argument, unlike most
+                        ## registry commands -- query_channel_mute added alongside
+                        ## query_channel_level for the same reason (see CMU/
+                        ## SpeakerChannelMute in decoders/audio.py).
+                        known_channels = (
+                            self.properties.channel_level
+                            if command.name == "query_channel_level"
+                            else self.properties.channel_mute
+                        )
                         channels = SpeakerChannel.CHANNELS_ALL
                         if zone in self.properties.zones_initial_refresh:
-                            channels = self.properties.channel_level.get(zone, {})
+                            channels = known_channels.get(zone, {})
                         for channel in channels:
+                            if (
+                                command.name == "query_channel_level"
+                                and channel not in SpeakerChannel.CHANNELS_ALL
+                            ):
+                                ## query_channel_level_bulk (ILV) decodes some
+                                ## channels -- eg. SW1 -- that the legacy
+                                ## per-channel CLV/ZGE/ZHE command family (and
+                                ## SpeakerChannel.CHANNELS_ALL) doesn't recognise
+                                ## as a queryable channel at all. This can happen
+                                ## even when PARAM_CHANNEL_LEVEL_COMMAND isn't
+                                ## "ILV" (eg. model detection failed this session
+                                ## and fell back to the CLV default) since the
+                                ## bulk ILV query is always enqueued regardless
+                                ## via the registry. Skip these unconditionally
+                                ## rather than crashing SpeakerChannel.value_to_code.
+                                continue
                             command_queue.enqueue(
                                 CommandItem(
                                     command.name,
@@ -855,6 +891,13 @@ class PioneerAVR(AVRConnection):
             )
             return
         await self.send_command("set_channel_level", channel, level, zone=zone)
+
+    async def set_channel_mute(
+        self, channel: str, mute: bool, zone: Zone = Zone.Z1
+    ) -> None:
+        """Mute or unmute an individual speaker channel."""
+        zone = self._check_zone(zone)
+        await self.send_command("set_channel_mute", channel, mute, zone=zone)
 
     async def set_video_settings(self, zone: Zone, **arguments) -> None:
         """Set video settings for a given zone."""
