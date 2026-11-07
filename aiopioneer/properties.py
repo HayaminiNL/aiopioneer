@@ -57,6 +57,7 @@ class AVRProperties:
 
         ## Complex object that holds multiple different props for the CHANNEL/DSP functions
         self.channel_level: dict[Zone, dict[str, Any]] = {}
+        self.graphic_eq: dict[Zone, dict[str, Any]] = {}
 
         ## Source name mappings
         self.query_sources = None

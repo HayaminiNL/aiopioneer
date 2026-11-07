@@ -847,6 +847,13 @@ class PioneerAVR(AVRConnection):
         zone = self._check_zone(zone)
         await self.send_command("set_channel_level", channel, level, zone=zone)
 
+    async def set_graphic_eq_level(
+        self, band: str, level: float, zone: Zone = Zone.Z1
+    ) -> None:
+        """Set the level (gain) for a graphic EQ band in zone (ATB command)."""
+        zone = self._check_zone(zone)
+        await self.send_command("set_graphic_eq_bulk", band, level, zone=zone)
+
     async def set_video_settings(self, zone: Zone, **arguments) -> None:
         """Set video settings for a given zone."""
         zone = self._check_zone(zone)
