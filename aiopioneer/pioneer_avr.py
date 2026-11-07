@@ -52,6 +52,7 @@ from .params import (
     PARAM_ENABLED_FUNCTIONS,
     PARAM_INITIAL_REFRESH_FUNCTIONS,
     PARAM_DISABLE_AUTO_QUERY,
+    PARAM_CHANNEL_LEVEL_COMMAND,
 )
 from .properties import AVRProperties
 from .property_registry import PROPERTY_REGISTRY
@@ -348,11 +349,35 @@ class PioneerAVR(AVRConnection):
                 for command in PROPERTY_REGISTRY.get_commands(
                     prefix=f"query_{func}", zone=zone
                 ):
+                    if command.name == "query_channel_level" and (
+                        self.params.get_param(PARAM_CHANNEL_LEVEL_COMMAND) == "ILV"
+                    ):
+                        ## This model reports/accepts channel levels via the bulk
+                        ## ILV command (query_channel_level_bulk, queued below via
+                        ## the generic no-args branch) and does not support the
+                        ## legacy per-channel CLV/ZGE/ZHE family at all -- see
+                        ## SpeakerChannelLevelBulk docstring. Skip the per-channel
+                        ## refresh entirely instead of firing CLV queries this
+                        ## receiver doesn't understand.
+                        continue
                     if command.name == "query_channel_level":
                         channels = SpeakerChannel.CHANNELS_ALL
                         if zone in self.properties.zones_initial_refresh:
                             channels = self.properties.channel_level.get(zone, {})
                         for channel in channels:
+                            if channel not in SpeakerChannel.CHANNELS_ALL:
+                                ## query_channel_level_bulk (ILV) decodes some
+                                ## channels -- eg. SW1 -- that the legacy
+                                ## per-channel CLV/ZGE/ZHE command family (and
+                                ## SpeakerChannel.CHANNELS_ALL) doesn't recognise
+                                ## as a queryable channel at all. This can happen
+                                ## even when PARAM_CHANNEL_LEVEL_COMMAND isn't
+                                ## "ILV" (eg. model detection failed this session
+                                ## and fell back to the CLV default) since the
+                                ## bulk ILV query is always enqueued regardless
+                                ## via the registry. Skip these unconditionally
+                                ## rather than crashing SpeakerChannel.value_to_code.
+                                continue
                             command_queue.enqueue(
                                 CommandItem(
                                     command.name,
@@ -845,6 +870,14 @@ class PioneerAVR(AVRConnection):
     ) -> None:
         """Set the level (gain) for amplifier channel in zone."""
         zone = self._check_zone(zone)
+        ## Some FY11-FY14 AVRs (e.g. VSX-924) accept the modern per-channel CLV
+        ## command syntactically but don't actually apply it -- PARAM_CHANNEL_LEVEL_COMMAND
+        ## routes those to the legacy bulk ILV command instead. See params.py.
+        if self.params.get_param(PARAM_CHANNEL_LEVEL_COMMAND) == "ILV":
+            await self.send_command(
+                "set_channel_level_bulk", channel, level, zone=zone
+            )
+            return
         await self.send_command("set_channel_level", channel, level, zone=zone)
 
     async def set_video_settings(self, zone: Zone, **arguments) -> None:

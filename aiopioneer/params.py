@@ -22,6 +22,11 @@ PARAM_MAX_VOLUME = "max_volume"
 PARAM_MAX_VOLUME_ZONEX = "max_volume_zonex"
 PARAM_POWER_ON_VOLUME_BOUNCE = "power_on_volume_bounce"
 PARAM_VOLUME_STEP_ONLY = "volume_step_only"
+## Which wire command PioneerAVR.set_channel_level() uses: "CLV" (default, modern
+## per-channel command) or "ILV" (legacy bulk command, for FY11-FY14 AVRs like the
+## VSX-924 where CLV is accepted but returns no real per-channel data -- confirmed
+## live against a real VSX-924, see aiopioneer PR/discussion for ILV support).
+PARAM_CHANNEL_LEVEL_COMMAND = "channel_level_command"
 PARAM_IGNORE_VOLUME_CHECK = "ignore_volume_check"
 PARAM_ALWAYS_POLL = "always_poll"
 PARAM_RETRY_COUNT = "retry_count"
@@ -108,6 +113,7 @@ DEFAULT_INITIAL_REFRESH_FUNCTIONS = [
 
 PARAM_DEFAULTS = {
     PARAM_MODEL: None,
+    PARAM_CHANNEL_LEVEL_COMMAND: "CLV",
     PARAM_IGNORED_ZONES: [],
     PARAM_COMMAND_DELAY: 0.1,
     PARAM_MAX_SOURCE_ID: 60,
@@ -302,6 +308,16 @@ PARAM_SPEAKER_SYSTEM_MODES_SC_LX79 = {
 
 PARAM_MODEL_DEFAULTS = OrderedDict(
     [
+        (
+            ## Confirmed live: this receiver accepts "?CLV"/set_channel_level
+            ## syntactically but returns a non-informative "CLVALL50" placeholder
+            ## rather than real per-channel data, and does not apply CLV sets.
+            ## ILV (bulk) is the only working command for channel levels here.
+            r"^VSX-924",
+            {
+                PARAM_CHANNEL_LEVEL_COMMAND: "ILV",
+            },
+        ),
         (
             r"^VSX-930",
             {
