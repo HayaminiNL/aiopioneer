@@ -16,6 +16,7 @@ from .code_map import (
     CodeDictStrMap,
     CodeStrMap,
     CodeBoolMap,
+    CodeInverseBoolMap,
     CodeIntMap,
     CodeFloatMap,
 )
@@ -407,6 +408,49 @@ class SpeakerChannelLevel(CodeMapSequence):
         return [response]
 
 
+class ChannelMute(CodeInverseBoolMap):
+    """
+    Speaker channel mute (CMU command). Wire "0" = muted, "1" = unmuted --
+    CodeInverseBoolMap gives a natural is_muted semantic (True = muted).
+    """
+
+    friendly_name = "channel mute"
+    base_property = "channel_mute"
+    property_name = "mute"  # unused for decode -- see SpeakerChannelMute
+    supported_zones = {Zone.Z1}  # only confirmed live against Main Zone so far
+
+
+class SpeakerChannelMute(CodeMapSequence):
+    """
+    Speaker channel mute / test-tone toggle (CMU command).
+
+    Used by the reference app during level calibration to temporarily silence or
+    play a test tone per channel, but confirmed live to work as a genuine
+    persistent per-channel mute independent of that context (state holds until
+    explicitly toggled back).
+
+    Confirmed via real app traffic capture (2026-09-06):
+      - SET wire format: "<channel><0|1>CMU" (value-first, command-last -- same
+        convention as ILV/CLV sends), e.g. "L__0CMU" = mute front left.
+      - Responses are command-first as usual: "CMU<channel><0|1>".
+      - QUERY is "?CMU<channel>" (command-first, channel as suffix) -- see the
+        CodeMapBlank(0) prefix trick on the query_command registration below,
+        same technique used for ILV's SET direction.
+    """
+
+    friendly_name = "speaker channel mute"
+    base_property = "channel_mute"
+    code_map_sequence = [SpeakerChannel, ChannelMute]
+
+    @classmethod
+    def decode_response(cls, response: Response, params: AVRParams) -> list[Response]:
+        responses = super().decode_response(response=response, params=params)
+        speaker = responses[0].value
+        muted = responses[1].value
+        response.update(code=responses[1].code, property_name=speaker, value=muted)
+        return [response]
+
+
 class ChannelLevelAt(ChannelLevel):
     """
     Channel level value at a fixed position within a bulk multi-channel level
@@ -729,6 +773,20 @@ PROPERTIES_AUDIO = [
         SpeakerChannelLevelBulk,
         {Zone.Z1: "ILV"},
         query_command=AVRCommand(is_query_command=True, wait_for_response=True),
+    ),
+    ## Per-channel mute / test-tone toggle, confirmed live via real app traffic
+    ## capture (see SpeakerChannelMute docstring). SET uses the default
+    ## prefix behaviour (channel+value before "CMU", same as ILV/CLV). QUERY
+    ## is "?CMU<channel>" (command first) -- CodeMapBlank(0) forces the channel
+    ## arg into the suffix slot so it lands after "?CMU" instead of before it.
+    gen_set_property(
+        SpeakerChannelMute,
+        {Zone.Z1: "CMU"},
+        query_command=AVRCommand(
+            avr_commands={Zone.Z1: "?CMU"},
+            avr_args=[CodeMapBlank(0), SpeakerChannel],
+            wait_for_response=True,
+        ),
     ),
     gen_set_property(
         ListeningMode,
